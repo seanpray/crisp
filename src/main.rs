@@ -34,7 +34,7 @@ fn main() {
                         "repeat" => {
                             input = previous;
                         }
-                        _ => {},
+                        _ => {}
                     }
                     previous = input.clone();
                     match Tokenizer::init(&input) {

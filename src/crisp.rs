@@ -1,13 +1,15 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::f64::consts::{E, PI, SQRT_2};
 use std::f64::EPSILON;
 use std::fmt::Display;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use lazy_static::lazy_static;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum Err {
     Syntax(usize, usize),
     UnevenParen(usize),
@@ -77,16 +79,16 @@ impl std::fmt::Debug for Expr {
     }
 }
 
+pub(crate) struct Env(BTreeMap<String, Expr>);
+
 lazy_static! {
-    pub(crate) static ref CONSTANTS: HashMap<&'static str, Expr> = HashMap::from([
+    pub(crate) static ref CONSTANTS: BTreeMap<&'static str, Expr> = BTreeMap::from([
         ("pi", Expr::Float(PI)),
         ("e", Expr::Float(E)),
         ("sqrt_2", Expr::Float(SQRT_2)),
     ]);
-    // pub(crate) static ref PROCEDURES
+    pub(crate) static ref ENV: Mutex<Env> = Mutex::new(Env::default());
 }
-
-pub(crate) struct Env(HashMap<String, Expr>);
 
 macro_rules! new_env {
     ($k:expr, $v:expr) => {
@@ -96,7 +98,7 @@ macro_rules! new_env {
 
 impl Default for Env {
     fn default() -> Self {
-        Self(HashMap::from([
+        Self(BTreeMap::from([
             new_env!(
                 "+",
                 Expr::Fn(|a: &[Expr]| -> Result<Expr, Err> {
@@ -266,7 +268,7 @@ impl Default for Env {
                     let start = SystemTime::now();
                     let mut res = Vec::new();
                     for v in a {
-                        if let Ok(v) = Tokenizer::eval(v, &mut Env::default()) {
+                        if let Ok(v) = Tokenizer::eval(v, &mut (ENV.lock().unwrap())) {
                             res.push(v);
                         }
                     }
@@ -330,6 +332,31 @@ impl Default for Env {
                     Ok(Expr::List(res))
                 })
             ),
+            new_env!(
+                "clear",
+                Expr::Fn(|a: &[Expr]| -> Result<Expr, Err> {
+                    for v in a {
+                        if let Expr::Sym(v) = v {
+                            ENV.lock().unwrap().0.remove(v);
+                        }
+                    }
+                    Ok(Expr::Bool(true))
+                })
+            ),
+            new_env!(
+                "define",
+                Expr::Fn(|a: &[Expr]| -> Result<Expr, Err> {
+                    if a.len() != 2 {
+                        return Err(Err::Generic(
+                            "tried to define procedure with more than 2 elements".into(),
+                        ));
+                    }
+                    if let (Expr::Sym(l), Expr::Sym(r)) = (&a[0], &a[1]) {
+                        // ENV.lock().unwrap().0.insert(a[0], );
+                    }
+                    Ok(Expr::Bool(true))
+                })
+            ),
         ]))
     }
 }
@@ -345,14 +372,11 @@ impl Tokenizer {
             .map(|x| x.to_string())
             .collect();
         let (parsed, _) = Self::parse(&tokens)?;
-        Self::eval(&parsed, &mut Env::default())
+        Self::eval(&parsed, &mut ENV.lock().unwrap())
     }
     fn eval(exp: &Expr, env: &mut Env) -> Result<Expr, Err> {
         match exp {
-            Expr::Sym(v) => Ok(env
-                .0
-                .get(v)
-                .unwrap_or(&Expr::Sym(v.to_string())).clone()),
+            Expr::Sym(v) => Ok(env.0.get(v).unwrap_or(&Expr::Sym(v.to_string())).clone()),
             Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => Ok(exp.clone()),
             Expr::Fn(_) => Err(Err::Generic("Invalid function".into())),
             Expr::List(l) => {
@@ -378,14 +402,30 @@ impl Tokenizer {
             .ok_or_else(|| Err::Generic("Token unreachable".into()))?;
         match &token[..] {
             "(" => {
-                let mut exprs = Vec::new();
+                let mut exprs = vec![];
                 let mut to_be_parsed = rest;
+                let mut to_procedure = false;
+                let mut proc: Vec<String> = vec![];
                 loop {
                     let (token, rest) = to_be_parsed
                         .split_first()
                         .ok_or_else(|| Err::Generic("No closing )".into()))?;
-                    if token.trim() == ")" {
-                        return Ok((Expr::List(exprs), rest));
+                    match token.trim() {
+                        ")" => {
+                            if !to_procedure {
+                                return Ok((Expr::List(exprs), rest));
+                            }
+                        }
+                        "[" => to_procedure = true,
+                        "]" => {
+                            to_procedure = false;
+                            exprs.push(Expr::Sym(proc.join(" ")))
+                        }
+                        _ => {
+                            if to_procedure {
+                                proc.push(token.clone());
+                            }
+                        }
                     }
                     let (parsed, left_to_parse) = Self::parse(to_be_parsed)?;
                     exprs.push(parsed);
@@ -396,7 +436,7 @@ impl Tokenizer {
             _ => Ok((Self::parse_atom(token), rest)),
         }
     }
-    fn parse_atom(token: &str) -> Expr {
+    pub fn parse_atom(token: &str) -> Expr {
         match token {
             "true" => Expr::Bool(true),
             "false" => Expr::Bool(false),
@@ -502,6 +542,9 @@ mod test {
     fn list_test() {
         let program = "(skip (take (repeat (* 2.1 2.4) 10 ) 4) 2)";
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::List(vec![Expr::Float(5.04), Expr::Float(5.04)]), tokenize.unwrap())
+        assert_eq!(
+            Expr::List(vec![Expr::Float(5.04), Expr::Float(5.04)]),
+            tokenize.unwrap()
+        )
     }
 }
