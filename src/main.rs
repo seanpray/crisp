@@ -1,14 +1,27 @@
 mod crisp;
-use std::env::args;
+use std::{
+    env::args,
+    io::{stdin, stdout, Write},
+};
 
-use crate::crisp::Tokenizer;
+use crate::crisp::{Expr, Tokenizer};
 
 macro_rules! pres {
     ($program:expr) => {
         println!("Evaluating  : {}", $program);
         let tokens = Tokenizer::init($program);
-        println!("Result      : {}", tokens.unwrap());
+        println!("Result      : {}", tokens.unwrap()[0]);
     };
+}
+
+macro_rules! pvec {
+    ($v:expr) => {{
+        let mut res = String::new();
+        for v in $v {
+            res.push_str(&v.to_string());
+        }
+        res
+    }};
 }
 
 fn main() {
@@ -18,11 +31,12 @@ fn main() {
     for arg in args {
         match arg.as_str() {
             "repl" => {
-                println!("crisp <- ");
+                print!("crisp <- ");
                 let mut previous = String::new();
                 loop {
+                    let _ = stdout().flush();
                     let mut input = String::new();
-                    std::io::stdin().read_line(&mut input).unwrap();
+                    stdin().read_line(&mut input).unwrap();
                     if input.trim().is_empty() {
                         break;
                     }
@@ -37,11 +51,14 @@ fn main() {
                         _ => {}
                     }
                     previous = input.clone();
-                    match Tokenizer::init(&input) {
-                        Ok(v) => println!("crisp -> {v}"),
-                        Err(e) => println!("eval failed -> {e}"),
-                    };
-                    println!("crisp <- ");
+                    let result = Tokenizer::init(&input);
+                    if let Err(v) = result {
+                        println!("eval failed {v}");
+                    } else {
+                        println!("crisp -> {}", pvec!(result.unwrap()));
+                    }
+                    // check for Nop
+                    print!("crisp <- ");
                 }
             }
             "showcase" => {
@@ -56,7 +73,7 @@ fn main() {
             _ => {
                 let data = std::fs::read_to_string(&arg).unwrap();
                 match Tokenizer::init(&data) {
-                    Ok(v) => println!("{v}"),
+                    Ok(v) => println!("{}", pvec!(v)),
                     _ => println!("eval failed for {arg}"),
                 };
             }

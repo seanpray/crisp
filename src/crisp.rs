@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::f64::consts::{E, PI, SQRT_2};
 use std::f64::EPSILON;
 use std::fmt::Display;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -26,6 +27,16 @@ impl Display for Err {
     }
 }
 
+// impl Display for Vec<Expr> {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         let mut result = String::new();
+//         for v in self {
+//             result.push_str(&v.to_string());
+//         }
+//         write!(f, "{}", result)
+//     }
+// }
+
 #[derive(Clone)]
 pub(crate) enum Expr {
     Bool(bool),
@@ -34,6 +45,7 @@ pub(crate) enum Expr {
     Float(f64),
     List(Vec<Expr>),
     Fn(fn(&[Expr]) -> Result<Expr, Err>),
+    Nop,
 }
 
 impl PartialEq for Expr {
@@ -56,23 +68,24 @@ impl Display for Expr {
             "{}",
             match self {
                 Expr::Sym(sym) => {
-                    format!(
+                    Cow::from(format!(
                         "{}",
                         CONSTANTS
-                            .lock()
+                            .read()
                             .unwrap()
                             .get(sym)
                             .unwrap_or(&Expr::Sym(sym.clone()))
-                    )
+                    ))
                 }
-                Expr::Int(n) => n.to_string(),
-                Expr::Float(n) => n.to_string(),
+                Expr::Int(n) => Cow::from(n.to_string()),
+                Expr::Float(n) => Cow::from(n.to_string()),
                 Expr::List(list) => {
                     let expressions: Vec<String> = list.iter().map(|x| x.to_string()).collect();
-                    format!("({})", expressions.join(","))
+                    Cow::from(format!("({})", expressions.join(",")))
                 }
-                Expr::Fn(_) => "Function {}".to_string(),
-                Expr::Bool(b) => b.to_string(),
+                Expr::Fn(_) => "Function {}".into(),
+                Expr::Bool(b) => Cow::from(b.to_string()),
+                Expr::Nop => "".into(),
             }
         )
     }
@@ -87,6 +100,7 @@ impl std::fmt::Debug for Expr {
             Self::Float(a) => f.debug_tuple("float").field(a).finish(),
             Self::List(a) => f.debug_tuple("list").field(a).finish(),
             Self::Fn(_) => write!(f, "function"),
+            Self::Nop => Ok(()),
         }
     }
 }
@@ -95,7 +109,7 @@ impl std::fmt::Debug for Expr {
 pub(crate) struct Env(BTreeMap<String, Expr>);
 
 lazy_static! {
-    pub(crate) static ref CONSTANTS: Mutex<BTreeMap<String, Expr>> = Mutex::new(BTreeMap::from(
+    pub(crate) static ref CONSTANTS: RwLock<BTreeMap<String, Expr>> = RwLock::new(BTreeMap::from(
         [
             ("pi", Expr::Float(PI)),
             ("e", Expr::Float(E)),
@@ -103,13 +117,13 @@ lazy_static! {
         ]
         .map(|(k, v)| (k.to_string(), v))
     ));
-    pub(crate) static ref ENV: Mutex<Env> = Mutex::new(Env::default());
+    pub(crate) static ref ENV: RwLock<Env> = RwLock::new(Env::default());
 }
 
 macro_rules! replace_var {
     ($token:expr) => {
         if let Expr::Sym(v) = $token {
-            if let Some(v) = CONSTANTS.lock().unwrap().get(v.into()) {
+            if let Some(v) = CONSTANTS.read().unwrap().get(v.into()) {
                 v.clone()
             } else {
                 Expr::Sym(v.to_string())
@@ -231,7 +245,6 @@ impl Default for Env {
                     "==",
                     Expr::Fn(|a: &[Expr]| -> Result<Expr, Err> {
                         let a = load_var!(a);
-                        println!("{:?}", a);
                         if a.len() != 2 {
                             return Err(Err::Generic("Expected 2 values".into()));
                         }
@@ -336,11 +349,37 @@ impl Default for Env {
                         }
                         let mut res = Vec::new();
                         if let Expr::Int(v) = a[1] {
+                            assert!(v >= 0);
                             for _ in 0..v {
                                 res.push(a[0].clone());
                             }
                         }
                         Ok(Expr::List(res))
+                    }),
+                ),
+                (
+                    "loop",
+                    Expr::Fn(|a: &[Expr]| -> Result<Expr, Err> {
+                        if a.len() != 2 {
+                            return Err(Err::Generic("Expected 2 values".into()));
+                        }
+                        if let (Expr::Int(v), Expr::Sym(expr)) = (&a[1], &a[0]) {
+                            assert!(v > &0);
+                            for _ in 0..(v - 1) {
+                                // let _ = Tokenizer::eval(&a[0], None);
+                                let tokens: Vec<String> = expr
+                                    .replace('(', " ( ")
+                                    .replace(')', " ) ")
+                                    .split_whitespace()
+                                    .filter_map(
+                                        |x| if x != "~" { Some(x.to_string()) } else { None },
+                                    )
+                                    .collect();
+                                let (parsed, _) = Tokenizer::parse(&tokens)?;
+                                let _ = Tokenizer::eval(&parsed, None)?;
+                            }
+                        }
+                        Ok(Expr::Nop)
                     }),
                 ),
                 (
@@ -378,7 +417,7 @@ impl Default for Env {
                     Expr::Fn(|a: &[Expr]| -> Result<Expr, Err> {
                         for v in a {
                             if let Expr::Sym(v) = v {
-                                ENV.lock().unwrap().0.remove(v);
+                                ENV.write().unwrap().0.remove(v);
                             }
                         }
                         Ok(Expr::Bool(true))
@@ -407,15 +446,41 @@ impl Default for Env {
                             ));
                         }
                         let (Expr::Sym(l), r) = (a[0].clone(), &a[1]) else {
-                        return Ok(Expr::Bool(false));
-                    };
+                            return Ok(Expr::Bool(false));
+                        };
                         CONSTANTS
-                            .lock()
+                            .write()
                             .unwrap()
                             .entry(l)
                             .and_modify(|x| *x = r.clone())
                             .or_insert_with(|| r.clone());
-                        Ok(Expr::Bool(true))
+                        Ok(Expr::Nop)
+                    }),
+                ),
+                (
+                    "print",
+                    Expr::Fn(|a: &[Expr]| -> Result<Expr, Err> {
+                        print!(
+                            "{}",
+                            a.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<String>>()
+                                .join(" ")
+                        );
+                        Ok(Expr::Nop)
+                    }),
+                ),
+                (
+                    "println",
+                    Expr::Fn(|a: &[Expr]| -> Result<Expr, Err> {
+                        println!(
+                            "{}",
+                            a.iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<String>>()
+                                .join(" ")
+                        );
+                        Ok(Expr::Nop)
                     }),
                 ),
             ]
@@ -427,25 +492,40 @@ impl Default for Env {
 pub(crate) struct Tokenizer;
 
 impl Tokenizer {
-    pub(crate) fn init(expr: &str) -> Result<Expr, Err> {
-        let tokens: Vec<String> = expr
-            .replace('\n', " ")
-            .replace('(', " ( ")
-            .replace(')', " ) ")
-            .split_whitespace()
-            .map(|x| x.to_string())
+    pub(crate) fn init(expr: &str) -> Result<Vec<Expr>, Err> {
+        let mut exprs = vec![];
+        let mut current = vec![];
+        for line in expr.lines() {
+            if line.starts_with('~') && !current.is_empty() {
+                exprs.push(current.join(" "));
+                current.clear();
+            }
+            current.push(line);
+        }
+        if !current.is_empty() {
+            exprs.push(current.join(" "));
+        }
+        let res: Result<Vec<Expr>, _> = exprs
+            .into_iter()
+            .map(|expr| {
+                let tokens: Vec<String> = expr
+                    .replace('(', " ( ")
+                    .replace(')', " ) ")
+                    .split_whitespace()
+                    .filter_map(|x| if x != "~" { Some(x.to_string()) } else { None })
+                    .collect();
+                let (parsed, _) = Self::parse(&tokens).unwrap();
+                let result = Self::eval(&parsed, None);
+                if let Ok(v) = &result {
+                    ENV.write().unwrap().0.insert("ans".to_string(), v.clone());
+                }
+                result
+            })
             .collect();
-        let (parsed, _) = Self::parse(&tokens)?;
-        Self::eval(&parsed, None)
+        res
     }
-    fn eval(exp: &Expr, env: Option<&mut Env>) -> Result<Expr, Err> {
-            let eenv = ENV.lock().unwrap();
-            let mut oenv = eenv.clone();
-            drop(eenv);
-        let env = match env {
-            Some(v) => v,
-            None => &mut oenv,
-        };
+    pub fn eval(exp: &Expr, env: Option<&mut Env>) -> Result<Expr, Err> {
+        let env = ENV.read().unwrap();
         match exp {
             Expr::Sym(v) => Ok({
                 if let Some(v) = env.0.get(v) {
@@ -462,16 +542,17 @@ impl Tokenizer {
                     .first()
                     .ok_or_else(|| Err::Generic("Expected non empty list".into()))?;
                 let args = &l[1..];
-                let evaled = Self::eval(first, Some(env))?;
+                let evaled = Self::eval(first, None)?;
                 match evaled {
                     Expr::Fn(f) => {
                         let evaled_arg: Result<Vec<Expr>, Err> =
-                            args.iter().map(|x| Self::eval(x, Some(env))).collect();
+                            args.iter().map(|x| Self::eval(x, None)).collect();
                         f(&evaled_arg?)
                     }
                     _ => Ok(Expr::List(l.to_vec())),
                 }
             }
+            Expr::Nop => Ok(Expr::Nop),
         }
     }
     fn parse(tokens: &[String]) -> Result<(Expr, &[String]), Err> {
@@ -484,6 +565,7 @@ impl Tokenizer {
                 let mut to_be_parsed = rest;
                 let mut to_procedure = false;
                 let mut proc: Vec<String> = vec![];
+                let mut delete = false;
                 loop {
                     let (token, rest) = to_be_parsed
                         .split_first()
@@ -492,12 +574,15 @@ impl Tokenizer {
                         ")" => {
                             if !to_procedure {
                                 return Ok((Expr::List(exprs), rest));
+                            } else {
+                                proc.push(")".into());
                             }
                         }
                         "[" => to_procedure = true,
                         "]" => {
                             to_procedure = false;
-                            exprs.push(Expr::Sym(proc.join(" ")))
+                            exprs.push(Expr::Sym(proc.join(" ")));
+                            delete = true;
                         }
                         _ => {
                             if to_procedure {
@@ -505,9 +590,17 @@ impl Tokenizer {
                             }
                         }
                     }
-                    let (parsed, left_to_parse) = Self::parse(to_be_parsed)?;
-                    exprs.push(parsed);
-                    to_be_parsed = left_to_parse;
+                    if to_be_parsed.is_empty() {
+                        break Ok((Expr::Nop, &[]));
+                    }
+                    if !to_procedure && !delete {
+                        let (parsed, left_to_parse) = Self::parse(to_be_parsed)?;
+                        exprs.push(parsed);
+                        to_be_parsed = left_to_parse;
+                    } else {
+                        to_be_parsed = &to_be_parsed[1..];
+                    }
+                    delete = false;
                 }
             }
             ")" => Err(Err::UnevenParen(1)),
@@ -568,49 +661,49 @@ mod test {
     fn eval_test() {
         let program = "(* 5 (/ (* (+ (abs (- 5 10)) 2) 2) 2))";
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::Int(35), tokenize.unwrap())
+        assert_eq!(vec![Expr::Int(35)], tokenize.unwrap())
     }
 
     #[test]
     fn constants_test() {
         let program = "(< 8.16 (* 2.6 pi))";
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::Bool(true), tokenize.unwrap())
+        assert_eq!(vec![Expr::Bool(true)], tokenize.unwrap())
     }
 
     #[test]
     fn comparison_test_g() {
         let program = "(> 4 3)";
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::Bool(true), tokenize.unwrap())
+        assert_eq!(vec![Expr::Bool(true)], tokenize.unwrap())
     }
 
     #[test]
     fn comparison_test_l() {
         let program = "(< 4 3)";
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::Bool(false), tokenize.unwrap())
+        assert_eq!(vec![Expr::Bool(false)], tokenize.unwrap())
     }
 
     #[test]
     fn comparison_test_le() {
         let program = "(<= 4 4)";
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::Bool(true), tokenize.unwrap())
+        assert_eq!(vec![Expr::Bool(true)], tokenize.unwrap())
     }
 
     #[test]
     fn comparison_test_ge() {
         let program = "(>= 4 4)";
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::Bool(true), tokenize.unwrap())
+        assert_eq!(vec![Expr::Bool(true)], tokenize.unwrap())
     }
 
     #[test]
     fn comparison_test_eq() {
         let program = "(== 4 4)";
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::Bool(true), tokenize.unwrap())
+        assert_eq!(vec![Expr::Bool(true)], tokenize.unwrap())
     }
 
     #[test]
@@ -618,7 +711,7 @@ mod test {
         let program = "(skip (take (repeat (* 2.1 2.4) 10 ) 4) 2)";
         let tokenize = Tokenizer::init(program);
         assert_eq!(
-            Expr::List(vec![Expr::Float(5.04), Expr::Float(5.04)]),
+            vec![Expr::List(vec![Expr::Float(5.04), Expr::Float(5.04)])],
             tokenize.unwrap()
         )
     }
@@ -626,11 +719,11 @@ mod test {
     #[test]
     fn bind_var() {
         let program = r#"
-            (bind x 40)
-            (bind x 20)
-            (x == 20)
+            ~(bind x 40)
+            ~(bind x 20)
+            ~(== x 20)
             "#;
         let tokenize = Tokenizer::init(program);
-        assert_eq!(Expr::Bool(true), tokenize.unwrap())
+        assert_eq!(vec![Expr::Bool(true)], tokenize.unwrap())
     }
 }
